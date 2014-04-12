@@ -25,8 +25,6 @@
 #define MDSS_MDP_HW_REV_102		0x10020000
 #define MDSS_MDP_HW_REV_103		0x10030000
 
-#define MDSS_MDP_FETCH_CONFIG_RESET_VALUE	0x00000087
-
 #define MDSS_REG_HW_VERSION				0x0
 #define MDSS_REG_HW_INTR_STATUS				0x10
 
@@ -419,6 +417,8 @@ enum mdss_mpd_intf_index {
 	MDSS_MDP_MAX_INTF
 };
 
+#define MDSS_MDP_REG_INTF_OFFSET(intf)		(0x20F00 + ((intf) * 0x200))
+
 #define MDSS_MDP_REG_INTF_TIMING_ENGINE_EN		0x000
 #define MDSS_MDP_REG_INTF_CONFIG			0x004
 #define MDSS_MDP_REG_INTF_HSYNC_CTL			0x008
@@ -497,6 +497,8 @@ enum mdss_mdp_pingpong_index {
 #define MDSS_MDP_REG_SMP_ALLOC_W0			0x00180
 #define MDSS_MDP_REG_SMP_ALLOC_R0			0x00230
 
+#define MDSS_MDP_SMP_MMB_BLOCKS			44
+
 #define MDSS_MDP_LP_MISR_SEL			0x450
 #define MDSS_MDP_LP_MISR_CTRL_MDP		0x454
 #define MDSS_MDP_LP_MISR_CTRL_HDMI		0x458
@@ -525,9 +527,5 @@ enum mdss_mdp_pingpong_index {
 #define MDSS_MDP_LP_MISR_SEL_LMIX3_GC		0x0F
 #define MDSS_MDP_LP_MISR_SEL_LMIX4_BLEND	0x10
 #define MDSS_MDP_LP_MISR_SEL_LMIX4_GC		0x11
-
-/* following offsets are with respect to MDP VBIF base */
-#define MMSS_VBIF_XIN_HALT_CTRL0	0x200
-#define MMSS_VBIF_XIN_HALT_CTRL1	0x204
 
 #endif

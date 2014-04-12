@@ -644,8 +644,7 @@ static int mdp3_overlay_play(struct msm_fb_data_type *mfd,
 	return rc;
 }
 
-static int mdp3_ctrl_display_commit_kickoff(struct msm_fb_data_type *mfd,
-					struct mdp_display_commit *cmt_data)
+static int mdp3_ctrl_display_commit_kickoff(struct msm_fb_data_type *mfd)
 {
 	struct mdp3_session_data *mdp3_session;
 	struct mdp3_img_data *data;

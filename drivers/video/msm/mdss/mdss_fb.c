@@ -83,7 +83,6 @@ static struct msm_mdp_interface *mdp_instance;
 static int mdss_fb_register(struct msm_fb_data_type *mfd);
 static int mdss_fb_open(struct fb_info *info, int user);
 static int mdss_fb_release(struct fb_info *info, int user);
-static int mdss_fb_release_all(struct fb_info *info, bool release_all);
 static int mdss_fb_pan_display(struct fb_var_screeninfo *var,
 			       struct fb_info *info);
 static int mdss_fb_check_var(struct fb_var_screeninfo *var,
@@ -100,7 +99,7 @@ static int __mdss_fb_sync_buf_done_callback(struct notifier_block *p,
 		unsigned long val, void *data);
 
 static int __mdss_fb_display_thread(void *data);
-static int mdss_fb_pan_idle(struct msm_fb_data_type *mfd);
+static void mdss_fb_pan_idle(struct msm_fb_data_type *mfd);
 static int mdss_fb_send_panel_event(struct msm_fb_data_type *mfd,
 					int event, void *arg);
 void mdss_fb_no_update_notify_timer_cb(unsigned long data)
@@ -115,10 +114,9 @@ void mdss_fb_no_update_notify_timer_cb(unsigned long data)
 static int mdss_fb_notify_update(struct msm_fb_data_type *mfd,
 							unsigned long *argp)
 {
-	int ret;
-	unsigned long notify = 0x0, to_user = 0x0;
+	int ret, notify, to_user;
 
-	ret = copy_from_user(&notify, argp, sizeof(unsigned long));
+	ret = copy_from_user(&notify, argp, sizeof(int));
 	if (ret) {
 		pr_err("%s:ioctl failed\n", __func__);
 		return ret;
@@ -127,24 +125,16 @@ static int mdss_fb_notify_update(struct msm_fb_data_type *mfd,
 	if (notify > NOTIFY_UPDATE_POWER_OFF)
 		return -EINVAL;
 
-	if (mfd->update.is_suspend) {
-		to_user = NOTIFY_TYPE_SUSPEND;
-		mfd->update.is_suspend = 0;
-		ret = 1;
-	} else if (notify == NOTIFY_UPDATE_START) {
+	if (notify == NOTIFY_UPDATE_START) {
 		INIT_COMPLETION(mfd->update.comp);
 		ret = wait_for_completion_interruptible_timeout(
 						&mfd->update.comp, 4 * HZ);
-		to_user = (unsigned int)mfd->update.value;
-		if (mfd->update.type == NOTIFY_TYPE_SUSPEND) {
-			to_user = (unsigned int)mfd->update.type;
-			ret = 1;
-		}
+		to_user = mfd->update.value;
 	} else if (notify == NOTIFY_UPDATE_STOP) {
 		INIT_COMPLETION(mfd->no_update.comp);
 		ret = wait_for_completion_interruptible_timeout(
 						&mfd->no_update.comp, 4 * HZ);
-		to_user = (unsigned int)mfd->no_update.value;
+		to_user = mfd->no_update.value;
 	} else {
 		if (mfd->panel_power_on) {
 			INIT_COMPLETION(mfd->power_off_comp);
@@ -156,7 +146,7 @@ static int mdss_fb_notify_update(struct msm_fb_data_type *mfd,
 	if (ret == 0)
 		ret = -ETIMEDOUT;
 	else if (ret > 0)
-		ret = copy_to_user(argp, &to_user, sizeof(unsigned long));
+		ret = copy_to_user(argp, &to_user, sizeof(int));
 	return ret;
 }
 
@@ -263,28 +253,12 @@ static ssize_t mdss_fb_get_split(struct device *dev,
 	return ret;
 }
 
-static ssize_t mdss_mdp_show_blank_event(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	struct fb_info *fbi = dev_get_drvdata(dev);
-	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)fbi->par;
-	int ret;
-
-	pr_debug("fb%d panel_power_on = %d\n", mfd->index, mfd->panel_power_on);
-	ret = scnprintf(buf, PAGE_SIZE, "panel_power_on = %d\n",
-						mfd->panel_power_on);
-
-	return ret;
-}
-
 static DEVICE_ATTR(msm_fb_type, S_IRUGO, mdss_fb_get_type, NULL);
 static DEVICE_ATTR(msm_fb_split, S_IRUGO, mdss_fb_get_split, NULL);
-static DEVICE_ATTR(show_blank_event, S_IRUGO, mdss_mdp_show_blank_event, NULL);
 
 static struct attribute *mdss_fb_attrs[] = {
 	&dev_attr_msm_fb_type.attr,
 	&dev_attr_msm_fb_split.attr,
-	&dev_attr_show_blank_event.attr,
 	NULL,
 };
 
@@ -311,10 +285,10 @@ static void mdss_fb_shutdown(struct platform_device *pdev)
 {
 	struct msm_fb_data_type *mfd = platform_get_drvdata(pdev);
 
-	mfd->shutdown_pending = true;
-	lock_fb_info(mfd->fbi);
-	mdss_fb_release_all(mfd->fbi, true);
-	unlock_fb_info(mfd->fbi);
+	for (; mfd->ref_cnt > 1; mfd->ref_cnt--)
+		pm_runtime_put(mfd->fbi->dev);
+
+	mdss_fb_release(mfd->fbi, 0);
 }
 
 static int mdss_fb_probe(struct platform_device *pdev)
@@ -734,7 +708,6 @@ static int mdss_fb_blank_sub(int blank_mode, struct fb_info *info,
 				mfd->panel_power_on = true;
 			mutex_lock(&mfd->update.lock);
 			mfd->update.type = NOTIFY_TYPE_UPDATE;
-			mfd->update.is_suspend = 0;
 			mutex_unlock(&mfd->update.lock);
 		}
 		break;
@@ -749,9 +722,7 @@ static int mdss_fb_blank_sub(int blank_mode, struct fb_info *info,
 
 			mutex_lock(&mfd->update.lock);
 			mfd->update.type = NOTIFY_TYPE_SUSPEND;
-			mfd->update.is_suspend = 1;
 			mutex_unlock(&mfd->update.lock);
-			complete(&mfd->update.comp);
 			del_timer(&mfd->no_update.timer);
 			mfd->no_update.value = NOTIFY_TYPE_SUSPEND;
 			complete(&mfd->no_update.comp);
@@ -813,18 +784,13 @@ static int mdss_fb_mmap(struct fb_info *info, struct vm_area_struct *vma)
 	u32 len = PAGE_ALIGN((start & ~PAGE_MASK) + info->fix.smem_len);
 	unsigned long off = vma->vm_pgoff << PAGE_SHIFT;
 	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)info->par;
-	int ret = 0;
 
 	if (!start) {
 		pr_warn("No framebuffer memory is allocated.\n");
 		return -ENOMEM;
 	}
 
-	ret = mdss_fb_pan_idle(mfd);
-	if (ret) {
-		pr_err("Shutdown pending. Aborting operation\n");
-		return ret;
-	}
+	mdss_fb_pan_idle(mfd);
 
 	/* Set VM flags. */
 	start &= PAGE_MASK;
@@ -1164,6 +1130,8 @@ static int mdss_fb_register(struct msm_fb_data_type *mfd)
 		     mfd->index, fbi->var.xres, fbi->var.yres,
 		     fbi->fix.smem_len);
 
+	kthread_run(__mdss_fb_display_thread, mfd, "mdss_fb%d", mfd->index);
+
 	return 0;
 }
 
@@ -1173,11 +1141,6 @@ static int mdss_fb_open(struct fb_info *info, int user)
 	struct mdss_fb_proc_info *pinfo = NULL;
 	int result;
 	int pid = current->tgid;
-
-	if (mfd->shutdown_pending) {
-		pr_err("Shutdown pending. Aborting operation\n");
-		return -EPERM;
-	}
 
 	list_for_each_entry(pinfo, &mfd->proc_list, list) {
 		if (pinfo->pid == pid)
@@ -1198,151 +1161,82 @@ static int mdss_fb_open(struct fb_info *info, int user)
 
 	result = pm_runtime_get_sync(info->dev);
 
-	if (result < 0) {
+	if (result < 0)
 		pr_err("pm_runtime: fail to wake up\n");
-		goto pm_error;
-	}
 
 	if (!mfd->ref_cnt) {
-		mfd->disp_thread = kthread_run(__mdss_fb_display_thread, mfd,
-				"mdss_fb%d", mfd->index);
-		if (IS_ERR(mfd->disp_thread)) {
-			pr_err("unable to start display thread %d\n",
-				mfd->index);
-			result = PTR_ERR(mfd->disp_thread);
-			mfd->disp_thread = NULL;
-			goto thread_error;
-		}
-
 		result = mdss_fb_blank_sub(FB_BLANK_UNBLANK, info,
 					   mfd->op_enable);
 		if (result) {
+			pm_runtime_put(info->dev);
 			pr_err("can't turn on fb%d! rc=%d\n", mfd->index,
 				result);
-			goto blank_error;
+			return result;
 		}
 	}
 
 	pinfo->ref_cnt++;
 	mfd->ref_cnt++;
-
 	return 0;
-
-blank_error:
-	kthread_stop(mfd->disp_thread);
-	mfd->disp_thread = NULL;
-
-thread_error:
-	if (pinfo && !pinfo->ref_cnt) {
-		list_del(&pinfo->list);
-		kfree(pinfo);
-	}
-	pm_runtime_put(info->dev);
-
-pm_error:
-	return result;
-}
-
-static int mdss_fb_release_all(struct fb_info *info, bool release_all)
-{
-	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)info->par;
-	struct mdss_fb_proc_info *pinfo = NULL, *temp_pinfo = NULL;
-	int ret = 0;
-	int pid = current->tgid;
-	bool unknown_pid = true, release_needed = false;
-	struct task_struct *task = current->group_leader;
-
-	if (!mfd->ref_cnt) {
-		pr_info("try to close unopened fb %d! from %s\n", mfd->index,
-			task->comm);
-		return -EINVAL;
-	}
-
-	mdss_fb_pan_idle(mfd);
-
-	pr_debug("release_all = %s\n", release_all ? "true" : "false");
-
-	list_for_each_entry_safe(pinfo, temp_pinfo, &mfd->proc_list, list) {
-		if (!release_all && (pinfo->pid != pid))
-			continue;
-
-		unknown_pid = false;
-
-		pr_debug("found process %s pid=%d mfd->ref=%d pinfo->ref=%d\n",
-			task->comm, mfd->ref_cnt, pinfo->pid, pinfo->ref_cnt);
-
-		do {
-			if (mfd->ref_cnt < pinfo->ref_cnt)
-				pr_warn("WARN:mfd->ref=%d < pinfo->ref=%d\n",
-					mfd->ref_cnt, pinfo->ref_cnt);
-			else
-				mfd->ref_cnt--;
-
-			pinfo->ref_cnt--;
-			pm_runtime_put(info->dev);
-		} while (release_all && pinfo->ref_cnt);
-
-		if (release_all && mfd->disp_thread) {
-			kthread_stop(mfd->disp_thread);
-			mfd->disp_thread = NULL;
-		}
-
-		if (pinfo->ref_cnt == 0) {
-			list_del(&pinfo->list);
-			kfree(pinfo);
-			release_needed = !release_all;
-		}
-
-		if (!release_all)
-			break;
-	}
-
-	if (release_needed) {
-		pr_debug("known process %s pid=%d mfd->ref=%d\n",
-			task->comm, pid, mfd->ref_cnt);
-
-		if (mfd->mdp.release_fnc) {
-			ret = mfd->mdp.release_fnc(mfd, false);
-			if (ret)
-				pr_err("error releasing fb%d pid=%d\n",
-					mfd->index, pid);
-		}
-	} else if (unknown_pid || release_all) {
-		pr_warn("unknown process %s pid=%d mfd->ref=%d\n",
-			task->comm, pid, mfd->ref_cnt);
-
-		if (mfd->ref_cnt)
-			mfd->ref_cnt--;
-
-		if (mfd->mdp.release_fnc) {
-			ret = mfd->mdp.release_fnc(mfd, true);
-			if (ret)
-				pr_err("error fb%d release process %s pid=%d\n",
-					mfd->index, task->comm, pid);
-		}
-	}
-
-	if (!mfd->ref_cnt) {
-		if (mfd->disp_thread) {
-			kthread_stop(mfd->disp_thread);
-			mfd->disp_thread = NULL;
-		}
-
-		ret = mdss_fb_blank_sub(FB_BLANK_POWERDOWN, info,
-			mfd->op_enable);
-		if (ret) {
-			pr_err("can't turn off fb%d! rc=%d process %s pid=%d\n",
-				mfd->index, ret, task->comm, pid);
-			return ret;
-		}
-	}
-
-	return ret;
 }
 
 static int mdss_fb_release(struct fb_info *info, int user)
 {
-	return mdss_fb_release_all(info, false);
+	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)info->par;
+	struct mdss_fb_proc_info *pinfo = NULL;
+	int ret = 0;
+	int pid = current->tgid;
+
+	if (!mfd->ref_cnt) {
+		pr_info("try to close unopened fb %d!\n", mfd->index);
+		return -EINVAL;
+	}
+
+	mdss_fb_pan_idle(mfd);
+	mfd->ref_cnt--;
+
+	list_for_each_entry(pinfo, &mfd->proc_list, list) {
+		if (pinfo->pid == pid)
+			break;
+	}
+
+	if (!pinfo || (pinfo->pid != pid)) {
+		pr_warn("unable to find process info for fb%d pid=%d\n",
+				mfd->index, pid);
+		if (mfd->mdp.release_fnc) {
+			ret = mfd->mdp.release_fnc(mfd);
+			if (ret)
+				pr_err("error releasing fb%d resources\n",
+						mfd->index);
+		}
+	} else {
+		pr_debug("found process entry pid=%d ref=%d\n",
+				pinfo->pid, pinfo->ref_cnt);
+
+		pinfo->ref_cnt--;
+		if (pinfo->ref_cnt == 0) {
+			if (mfd->mdp.release_fnc) {
+				ret = mfd->mdp.release_fnc(mfd);
+				if (ret)
+					pr_err("error releasing fb%d pid=%d\n",
+						mfd->index, pinfo->pid);
+			}
+			list_del(&pinfo->list);
+			kfree(pinfo);
+		}
+	}
+
+	if (!mfd->ref_cnt) {
+		ret = mdss_fb_blank_sub(FB_BLANK_POWERDOWN, info,
+				       mfd->op_enable);
+		if (ret) {
+			pr_err("can't turn off fb%d! rc=%d\n", mfd->index, ret);
+			return ret;
+		}
+	}
+
+	pm_runtime_put(info->dev);
+	return ret;
 }
 
 static void mdss_fb_power_setting_idle(struct msm_fb_data_type *mfd)
@@ -1473,35 +1367,20 @@ static int __mdss_fb_sync_buf_done_callback(struct notifier_block *p,
 	return NOTIFY_OK;
 }
 
-/**
- * mdss_fb_pan_idle() - wait for panel programming to be idle
- * @mfd:	Framebuffer data structure for display
- *
- * Wait for any pending programming to be done if in the process of programming
- * hardware configuration. After this function returns it is safe to perform
- * software updates for next frame.
- */
-static int mdss_fb_pan_idle(struct msm_fb_data_type *mfd)
+static void mdss_fb_pan_idle(struct msm_fb_data_type *mfd)
 {
-	int ret = 0;
+	int ret;
 
 	ret = wait_event_timeout(mfd->idle_wait_q,
-			(!atomic_read(&mfd->commits_pending) ||
-			 mfd->shutdown_pending),
+			!atomic_read(&mfd->commits_pending),
 			msecs_to_jiffies(WAIT_DISP_OP_TIMEOUT));
 	if (!ret) {
 		pr_err("wait for idle timeout %d pending=%d\n",
 				ret, atomic_read(&mfd->commits_pending));
 
 		mdss_fb_signal_timeline(&mfd->mdp_sync_pt_data);
-	} else if (mfd->shutdown_pending) {
-		pr_debug("Shutdown signalled\n");
-		return -EPERM;
 	}
-
-	return 0;
 }
-
 
 static int mdss_fb_pan_display_ex(struct fb_info *info,
 		struct mdp_display_commit *disp_commit)
@@ -1520,11 +1399,7 @@ static int mdss_fb_pan_display_ex(struct fb_info *info,
 	if (var->yoffset > (info->var.yres_virtual - info->var.yres))
 		return -EINVAL;
 
-	ret = mdss_fb_pan_idle(mfd);
-	if (ret) {
-		pr_err("Shutdown pending. Aborting operation\n");
-		return ret;
-	}
+	mdss_fb_pan_idle(mfd);
 
 	mutex_lock(&mfd->mdp_sync_pt_data.sync_mutex);
 	if (info->fix.xpanstep)
@@ -1615,7 +1490,7 @@ static int __mdss_fb_perform_commit(struct msm_fb_data_type *mfd)
 
 	if (fb_backup->disp_commit.flags & MDP_DISPLAY_COMMIT_OVERLAY) {
 		if (mfd->mdp.kickoff_fnc)
-			ret = mfd->mdp.kickoff_fnc(mfd, &fb_backup->disp_commit);
+			ret = mfd->mdp.kickoff_fnc(mfd);
 		else
 			pr_warn("no kickoff function setup for fb%d\n",
 					mfd->index);
@@ -1644,25 +1519,14 @@ static int __mdss_fb_display_thread(void *data)
 		pr_info("%s: set priority failed\n", __func__);
 
 	while (1) {
-		ret = wait_event_interruptible(mfd->commit_wait_q,
-				(atomic_read(&mfd->commits_pending) ||
-				 kthread_should_stop()));
-
-		if (ret) {
-			pr_info("%s: interrupted", __func__);
-			continue;
-		}
-
-		if (kthread_should_stop())
-			break;
+		wait_event(mfd->commit_wait_q,
+				atomic_read(&mfd->commits_pending));
 
 		ret = __mdss_fb_perform_commit(mfd);
+
 		atomic_dec(&mfd->commits_pending);
 		wake_up_all(&mfd->idle_wait_q);
 	}
-
-	atomic_set(&mfd->commits_pending, 0);
-	wake_up_all(&mfd->idle_wait_q);
 
 	return ret;
 }
@@ -1786,14 +1650,8 @@ static int mdss_fb_set_par(struct fb_info *info)
 	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)info->par;
 	struct fb_var_screeninfo *var = &info->var;
 	int old_imgType;
-	int ret = 0;
 
-	ret = mdss_fb_pan_idle(mfd);
-	if (ret) {
-		pr_err("Shutdown pending. Aborting operation\n");
-		return ret;
-	}
-
+	mdss_fb_pan_idle(mfd);
 	old_imgType = mfd->fb_imgType;
 	switch (var->bits_per_pixel) {
 	case 16:
@@ -1840,7 +1698,7 @@ static int mdss_fb_set_par(struct fb_info *info)
 		mfd->panel_reconfig = false;
 	}
 
-	return ret;
+	return 0;
 }
 
 int mdss_fb_dcm(struct msm_fb_data_type *mfd, int req_state)
@@ -1956,7 +1814,7 @@ struct sync_fence *mdss_fb_sync_get_fence(struct sw_sync_timeline *timeline,
 static int mdss_fb_handle_buf_sync_ioctl(struct msm_sync_pt_data *sync_pt_data,
 				 struct mdp_buf_sync *buf_sync)
 {
-	int i, ret = 0;
+	int i, fence_cnt = 0, ret = 0;
 	int acq_fen_fd[MDP_MAX_FENCE_FD];
 	struct sync_fence *fence, *rel_fence, *retire_fence;
 	int rel_fen_fd;
@@ -1994,9 +1852,10 @@ static int mdss_fb_handle_buf_sync_ioctl(struct msm_sync_pt_data *sync_pt_data,
 		}
 		sync_pt_data->acq_fen[i] = fence;
 	}
-	sync_pt_data->acq_fen_cnt = i;
+	fence_cnt = i;
 	if (ret)
 		goto buf_sync_err_1;
+	sync_pt_data->acq_fen_cnt = fence_cnt;
 
 	val = sync_pt_data->timeline_value + sync_pt_data->threshold +
 			atomic_read(&sync_pt_data->commit_cnt);
@@ -2075,7 +1934,7 @@ buf_sync_err_3:
 buf_sync_err_2:
 	sync_fence_put(rel_fence);
 buf_sync_err_1:
-	for (i = 0; i < sync_pt_data->acq_fen_cnt; i++)
+	for (i = 0; i < fence_cnt; i++)
 		sync_fence_put(sync_pt_data->acq_fen[i]);
 	sync_pt_data->acq_fen_cnt = 0;
 	mutex_unlock(&sync_pt_data->sync_mutex);
@@ -2111,16 +1970,8 @@ static int mdss_fb_ioctl(struct fb_info *info, unsigned int cmd,
 		return -EINVAL;
 	mfd = (struct msm_fb_data_type *)info->par;
 	mdss_fb_power_setting_idle(mfd);
-	if ((cmd != MSMFB_VSYNC_CTRL) && (cmd != MSMFB_OVERLAY_VSYNC_CTRL) &&
-			(cmd != MSMFB_ASYNC_BLIT) && (cmd != MSMFB_BLIT) &&
-			(cmd != MSMFB_NOTIFY_UPDATE)) {
-		ret = mdss_fb_pan_idle(mfd);
-		if (ret) {
-			pr_debug("Shutdown pending. Aborting operation %x\n",
-				cmd);
-			return ret;
-		}
-	}
+	if (cmd != MSMFB_VSYNC_CTRL && cmd != MSMFB_OVERLAY_VSYNC_CTRL)
+		mdss_fb_pan_idle(mfd);
 
 	switch (cmd) {
 	case MSMFB_CURSOR:
@@ -2319,27 +2170,3 @@ int __init mdss_fb_init(void)
 }
 
 module_init(mdss_fb_init);
-
-int mdss_fb_suspres_panel(struct device *dev, void *data)
-{
-	struct msm_fb_data_type *mfd;
-	int rc;
-	u32 event;
-
-	if (!data) {
-		pr_err("Device state not defined\n");
-		return -EINVAL;
-	}
-	mfd = dev_get_drvdata(dev);
-	if (!mfd)
-		return 0;
-
-	event = *((bool *) data) ? MDSS_EVENT_RESUME : MDSS_EVENT_SUSPEND;
-
-	rc = mdss_fb_send_panel_event(mfd, event, NULL);
-	if (rc)
-		pr_warn("unable to %s fb%d (%d)\n",
-			event == MDSS_EVENT_RESUME ? "resume" : "suspend",
-			mfd->index, rc);
-	return rc;
-}

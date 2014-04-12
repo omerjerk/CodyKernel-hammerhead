@@ -30,7 +30,6 @@
 
 static unsigned char *mdss_dsi_base;
 static int mdss_dsi_use_vdd_supply = 1;
-extern struct mdss_panel_data *cmds_panel_data;
 
 static int mdss_dsi_regulator_init(struct platform_device *pdev)
 {
@@ -130,8 +129,6 @@ static int mdss_dsi_panel_power_on(struct mdss_panel_data *pdata, int enable)
 	ctrl_pdata = container_of(pdata, struct mdss_dsi_ctrl_pdata,
 				panel_data);
 	pr_debug("%s: enable=%d\n", __func__, enable);
-
-	cmds_panel_data = pdata;
 
 	if (enable) {
 		if (ctrl_pdata->power_data.num_vreg > 0) {
@@ -425,7 +422,7 @@ static int mdss_dsi_off(struct mdss_panel_data *pdata)
 
 	if (!pdata->panel_info.panel_power_on) {
 		pr_warn("%s:%d Panel already off.\n", __func__, __LINE__);
-		return 0;
+		return -EPERM;
 	}
 
 	pdata->panel_info.panel_power_on = 0;
@@ -719,43 +716,6 @@ int mdss_dsi_cont_splash_on(struct mdss_panel_data *pdata)
 	return ret;
 }
 
-static int mdss_dsi_ctl_partial_update(struct mdss_panel_data *pdata)
-{
-	int rc = -EINVAL;
-	u32 data;
-	struct mdss_dsi_ctrl_pdata *ctrl_pdata = NULL;
-
-	if (pdata == NULL) {
-		pr_err("%s: Invalid input data\n", __func__);
-		return -EINVAL;
-	}
-
-	ctrl_pdata = container_of(pdata, struct mdss_dsi_ctrl_pdata,
-				panel_data);
-
-	/* DSI_COMMAND_MODE_MDP_STREAM_CTRL */
-	data = (((pdata->panel_info.roi_w * 3) + 1) << 16) |
-			(pdata->panel_info.mipi.vc << 8) | DTYPE_DCS_LWRITE;
-	MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x60, data);
-	MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x58, data);
-
-	/* DSI_COMMAND_MODE_MDP_STREAM_TOTAL */
-	data = pdata->panel_info.roi_h << 16 | pdata->panel_info.roi_w;
-	MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x64, data);
-	MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x5C, data);
-
-	if (ctrl_pdata->partial_update_fnc)
-		rc = ctrl_pdata->partial_update_fnc(pdata);
-
-	if (rc) {
-		pr_err("%s: unable to initialize the panel\n",
-				__func__);
-		return rc;
-	}
-
-	return rc;
-}
-
 static int mdss_dsi_event_handler(struct mdss_panel_data *pdata,
 				  int event, void *arg)
 {
@@ -819,9 +779,6 @@ static int mdss_dsi_event_handler(struct mdss_panel_data *pdata,
 			/* Panel is Enabled in Bootloader */
 			rc = mdss_dsi_blank(pdata);
 		}
-		break;
-	case MDSS_EVENT_ENABLE_PARTIAL_UPDATE:
-		rc = mdss_dsi_ctl_partial_update(pdata);
 		break;
 	default:
 		pr_debug("%s: unhandled event=%d\n", __func__, event);
@@ -1268,8 +1225,6 @@ int dsi_panel_device_register(struct platform_device *pdev,
 			ctrl_pdata->ctrl_base, ctrl_pdata->reg_size);
 		ctrl_pdata->ndx = 1;
 	}
-
-	ctrl_pdata->partial_update_fnc = panel_data->partial_update_fnc;
 
 	pr_debug("%s: Panal data initialized\n", __func__);
 	return 0;

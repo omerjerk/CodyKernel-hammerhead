@@ -1608,6 +1608,8 @@ static int hdmi_tx_enable_power(struct hdmi_tx_ctrl *hdmi_ctrl,
 	} else {
 		msm_dss_enable_clk(power_data->clk_config,
 			power_data->num_clk, 0);
+		msm_dss_clk_set_rate(power_data->clk_config,
+			power_data->num_clk);
 		msm_dss_enable_gpio(power_data->gpio_config,
 			power_data->num_gpio, 0);
 		msm_dss_enable_vreg(power_data->vreg_config,
@@ -2353,6 +2355,12 @@ static void hdmi_tx_power_off_work(struct work_struct *work)
 
 	hdmi_tx_powerdown_phy(hdmi_ctrl);
 
+	/*
+	 * this is needed to avoid pll lock failure due to
+	 * clk framework's rate caching.
+	 */
+	hdmi_ctrl->pdata.power_data[HDMI_TX_CORE_PM].clk_config[0].rate = 0;
+
 	hdmi_cec_deconfig(hdmi_ctrl->feature_data[HDMI_TX_FEAT_CEC]);
 
 	hdmi_tx_core_off(hdmi_ctrl);
@@ -2424,7 +2432,7 @@ static int hdmi_tx_power_on(struct mdss_panel_data *panel_data)
 	flush_work_sync(&hdmi_ctrl->power_off_work);
 
 	if (hdmi_ctrl->pdata.primary) {
-		timeout = wait_for_completion_timeout(
+		timeout = wait_for_completion_interruptible_timeout(
 			&hdmi_ctrl->hpd_done, HZ);
 		if (!timeout) {
 			DEV_ERR("%s: cable connection hasn't happened yet\n",
@@ -2885,7 +2893,7 @@ static int hdmi_tx_panel_event_handler(struct mdss_panel_data *panel_data,
 			u32 timeout;
 			hdmi_ctrl->panel_suspend = false;
 
-			timeout = wait_for_completion_timeout(
+			timeout = wait_for_completion_interruptible_timeout(
 				&hdmi_ctrl->hpd_done, HZ/10);
 			if (!timeout & !hdmi_ctrl->hpd_state) {
 				DEV_INFO("%s: cable removed during suspend\n",

@@ -299,7 +299,6 @@ struct mdss_panel_common_pdata {
 	int (*on) (struct mdss_panel_data *pdata);
 	int (*off) (struct mdss_panel_data *pdata);
 	void (*bl_fnc) (struct mdss_panel_data *pdata, u32 bl_level);
-	int (*partial_update_fnc) (struct mdss_panel_data *pdata);
 
 	struct dsi_panel_cmds on_cmds;
 	struct dsi_panel_cmds off_cmds;
@@ -322,7 +321,6 @@ struct mdss_dsi_ctrl_pdata {
 	int ndx;	/* panel_num */
 	int (*on) (struct mdss_panel_data *pdata);
 	int (*off) (struct mdss_panel_data *pdata);
-	int (*partial_update_fnc) (struct mdss_panel_data *pdata);
 	struct mdss_panel_data panel_data;
 	unsigned char *ctrl_base;
 	int reg_size;
@@ -334,7 +332,6 @@ struct mdss_dsi_ctrl_pdata {
 	struct clk *esc_clk;
 	struct clk *pixel_clk;
 	u8 ctrl_state;
-	int panel_mode;
 	int irq_cnt;
 	int mdss_dsi_clk_on;
 	int rst_gpio;

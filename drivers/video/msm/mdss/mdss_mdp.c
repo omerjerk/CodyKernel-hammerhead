@@ -48,7 +48,6 @@
 #include <mach/iommu_domains.h>
 #include <mach/memory.h>
 #include <mach/msm_memtypes.h>
-#include <mach/rpm-regulator-smd.h>
 
 #include "mdss.h"
 #include "mdss_fb.h"
@@ -538,8 +537,6 @@ static int mdss_mdp_clk_update(u32 clk_idx, u32 enable)
 	if (clk) {
 		pr_debug("clk=%d en=%d\n", clk_idx, enable);
 		if (enable) {
-			if (clk_idx == MDSS_CLK_MDP_VSYNC)
-				clk_set_rate(clk, 19200000);
 			ret = clk_prepare_enable(clk);
 		} else {
 			clk_disable_unprepare(clk);
@@ -640,7 +637,6 @@ void mdss_bus_bandwidth_ctrl(int enable)
 		if (!enable) {
 			msm_bus_scale_client_update_request(
 				mdata->bus_hdl, 0);
-			mdss_iommu_dettach(mdata);
 			pm_runtime_put(&mdata->pdev->dev);
 		} else {
 			pm_runtime_get_sync(&mdata->pdev->dev);
@@ -730,7 +726,7 @@ static int mdss_mdp_irq_clk_setup(struct mdss_data_type *mdata)
 
 	pr_debug("max mdp clk rate=%d\n", mdata->max_mdp_clk_rate);
 
-	ret = devm_request_irq(&mdata->pdev->dev, mdata->irq, mdss_irq_handler,
+	ret = request_irq(mdata->irq, mdss_irq_handler,
 			 IRQF_DISABLED,	"MDSS", mdata);
 	if (ret) {
 		pr_err("mdp request_irq() failed!\n");
@@ -745,14 +741,6 @@ static int mdss_mdp_irq_clk_setup(struct mdss_data_type *mdata)
 		return -EINVAL;
 	}
 	mdata->fs_ena = false;
-
-	mdata->vdd_cx = devm_regulator_get(&mdata->pdev->dev,
-				"vdd-cx");
-	if (IS_ERR_OR_NULL(mdata->vdd_cx)) {
-		pr_debug("unable to get CX reg. rc=%d\n",
-					PTR_RET(mdata->vdd_cx));
-		mdata->vdd_cx = NULL;
-	}
 
 	if (mdss_mdp_irq_clk_register(mdata, "bus_clk", MDSS_CLK_AXI) ||
 	    mdss_mdp_irq_clk_register(mdata, "iface_clk", MDSS_CLK_AHB) ||
@@ -944,11 +932,6 @@ static u32 mdss_mdp_res_init(struct mdss_data_type *mdata)
 	if (rc)
 		return rc;
 
-	mdata->hist_intr.req = 0;
-	mdata->hist_intr.curr = 0;
-	mdata->hist_intr.state = 0;
-	spin_lock_init(&mdata->hist_intr.lock);
-
 	mdata->iclient = msm_ion_client_create(-1, mdata->pdev->name);
 	if (IS_ERR_OR_NULL(mdata->iclient)) {
 		pr_err("msm_ion_client_create() return error (%p)\n",
@@ -1001,8 +984,6 @@ static ssize_t mdss_mdp_show_capabilities(struct device *dev,
 		SPRINT(" bwc");
 	if (mdata->has_decimation)
 		SPRINT(" decimation");
-	if (mdata->highest_bank_bit)
-		SPRINT(" tile_format");
 	SPRINT("\n");
 
 	return cnt;
@@ -1053,7 +1034,6 @@ static int mdss_mdp_probe(struct platform_device *pdev)
 	mdata->pdev = pdev;
 	platform_set_drvdata(pdev, mdata);
 	mdss_res = mdata;
-	mutex_init(&mdata->reg_lock);
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "mdp_phys");
 	if (!res) {
@@ -1151,9 +1131,8 @@ static int mdss_mdp_probe(struct platform_device *pdev)
 probe_done:
 	if (IS_ERR_VALUE(rc)) {
 		mdss_mdp_hw.ptr = NULL;
-		mdss_mdp_pp_term(&pdev->dev);
-		mutex_destroy(&mdata->reg_lock);
 		mdss_res = NULL;
+		mdss_mdp_pp_term(&pdev->dev);
 	}
 
 	return rc;
@@ -1277,8 +1256,8 @@ static int mdss_mdp_parse_dt_pipe(struct platform_device *pdev)
 {
 	u32 npipes, dma_off;
 	int rc = 0;
-	u32 nfids = 0, setup_cnt = 0, len, nxids = 0;
-	u32 *offsets = NULL, *ftch_id = NULL, *xin_id = NULL;
+	u32 nids = 0, setup_cnt = 0, len;
+	u32 *offsets = NULL, *ftch_id = NULL;
 
 	struct mdss_data_type *mdata = platform_get_drvdata(pdev);
 
@@ -1289,24 +1268,17 @@ static int mdss_mdp_parse_dt_pipe(struct platform_device *pdev)
 	mdata->ndma_pipes = mdss_mdp_parse_dt_prop_len(pdev,
 				"qcom,mdss-pipe-dma-off");
 
+	nids  += mdss_mdp_parse_dt_prop_len(pdev,
+			"qcom,mdss-pipe-vig-fetch-id");
+	nids  += mdss_mdp_parse_dt_prop_len(pdev,
+			"qcom,mdss-pipe-rgb-fetch-id");
+	nids  += mdss_mdp_parse_dt_prop_len(pdev,
+			"qcom,mdss-pipe-dma-fetch-id");
+
 	npipes = mdata->nvig_pipes + mdata->nrgb_pipes + mdata->ndma_pipes;
 
-	nfids  += mdss_mdp_parse_dt_prop_len(pdev,
-			"qcom,mdss-pipe-vig-fetch-id");
-	nfids  += mdss_mdp_parse_dt_prop_len(pdev,
-			"qcom,mdss-pipe-rgb-fetch-id");
-	nfids  += mdss_mdp_parse_dt_prop_len(pdev,
-			"qcom,mdss-pipe-dma-fetch-id");
-	if (npipes != nfids) {
+	if (npipes != nids) {
 		pr_err("device tree err: unequal number of pipes and smp ids");
-		return -EINVAL;
-	}
-
-	nxids += mdss_mdp_parse_dt_prop_len(pdev, "qcom,mdss-pipe-vig-xin-id");
-	nxids += mdss_mdp_parse_dt_prop_len(pdev, "qcom,mdss-pipe-rgb-xin-id");
-	nxids += mdss_mdp_parse_dt_prop_len(pdev, "qcom,mdss-pipe-dma-xin-id");
-	if (npipes != nxids) {
-		pr_err("device tree err: unequal number of pipes and xin ids");
 		return -EINVAL;
 	}
 
@@ -1316,18 +1288,11 @@ static int mdss_mdp_parse_dt_pipe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 
-	ftch_id = kzalloc(sizeof(u32) * nfids, GFP_KERNEL);
+	ftch_id = kzalloc(sizeof(u32) * nids, GFP_KERNEL);
 	if (!ftch_id) {
 		pr_err("no mem assigned for ftch_id: kzalloc fail\n");
 		rc = -ENOMEM;
 		goto ftch_alloc_fail;
-	}
-
-	xin_id = kzalloc(sizeof(u32) * nxids, GFP_KERNEL);
-	if (!xin_id) {
-		pr_err("no mem assigned for xin_id: kzalloc fail\n");
-		rc = -ENOMEM;
-		goto xin_alloc_fail;
 	}
 
 	mdata->vig_pipes = devm_kzalloc(&mdata->pdev->dev,
@@ -1357,12 +1322,7 @@ static int mdss_mdp_parse_dt_pipe(struct platform_device *pdev)
 	rc = mdss_mdp_parse_dt_handler(pdev, "qcom,mdss-pipe-vig-fetch-id",
 		ftch_id, mdata->nvig_pipes);
 	if (rc)
-		goto parse_fail;
-
-	rc = mdss_mdp_parse_dt_handler(pdev, "qcom,mdss-pipe-vig-xin-id",
-		xin_id, mdata->nvig_pipes);
-	if (rc)
-		goto parse_fail;
+		goto parse_done;
 
 	rc = mdss_mdp_parse_dt_handler(pdev, "qcom,mdss-pipe-vig-off",
 		offsets, mdata->nvig_pipes);
@@ -1371,7 +1331,7 @@ static int mdss_mdp_parse_dt_pipe(struct platform_device *pdev)
 
 	len = min_t(int, DEFAULT_TOTAL_VIG_PIPES, (int)mdata->nvig_pipes);
 	rc = mdss_mdp_pipe_addr_setup(mdata, mdata->vig_pipes, offsets, ftch_id,
-		xin_id, MDSS_MDP_PIPE_TYPE_VIG, MDSS_MDP_SSPP_VIG0, len);
+		MDSS_MDP_PIPE_TYPE_VIG, MDSS_MDP_SSPP_VIG0, len);
 	if (rc)
 		goto parse_fail;
 
@@ -1379,11 +1339,6 @@ static int mdss_mdp_parse_dt_pipe(struct platform_device *pdev)
 
 	rc = mdss_mdp_parse_dt_handler(pdev, "qcom,mdss-pipe-rgb-fetch-id",
 		ftch_id + mdata->nvig_pipes, mdata->nrgb_pipes);
-	if (rc)
-		goto parse_fail;
-
-	rc = mdss_mdp_parse_dt_handler(pdev, "qcom,mdss-pipe-rgb-xin-id",
-		xin_id + mdata->nvig_pipes, mdata->nrgb_pipes);
 	if (rc)
 		goto parse_fail;
 
@@ -1395,8 +1350,7 @@ static int mdss_mdp_parse_dt_pipe(struct platform_device *pdev)
 	len = min_t(int, DEFAULT_TOTAL_RGB_PIPES, (int)mdata->nrgb_pipes);
 	rc = mdss_mdp_pipe_addr_setup(mdata, mdata->rgb_pipes,
 		offsets + mdata->nvig_pipes, ftch_id + mdata->nvig_pipes,
-		xin_id + mdata->nvig_pipes, MDSS_MDP_PIPE_TYPE_RGB,
-		MDSS_MDP_SSPP_RGB0, len);
+		MDSS_MDP_PIPE_TYPE_RGB, MDSS_MDP_SSPP_RGB0, len);
 	if (rc)
 		goto parse_fail;
 
@@ -1408,11 +1362,6 @@ static int mdss_mdp_parse_dt_pipe(struct platform_device *pdev)
 	if (rc)
 		goto parse_fail;
 
-	rc = mdss_mdp_parse_dt_handler(pdev, "qcom,mdss-pipe-dma-xin-id",
-		xin_id + dma_off, mdata->ndma_pipes);
-	if (rc)
-		goto parse_fail;
-
 	rc = mdss_mdp_parse_dt_handler(pdev, "qcom,mdss-pipe-dma-off",
 		offsets + dma_off, mdata->ndma_pipes);
 	if (rc)
@@ -1420,8 +1369,8 @@ static int mdss_mdp_parse_dt_pipe(struct platform_device *pdev)
 
 	len = mdata->ndma_pipes;
 	rc = mdss_mdp_pipe_addr_setup(mdata, mdata->dma_pipes,
-		offsets + dma_off, ftch_id + dma_off, xin_id + dma_off,
-		MDSS_MDP_PIPE_TYPE_DMA, MDSS_MDP_SSPP_DMA0, len);
+		 offsets + dma_off, ftch_id + dma_off, MDSS_MDP_PIPE_TYPE_DMA,
+		 MDSS_MDP_SSPP_DMA0, len);
 	if (rc)
 		goto parse_fail;
 
@@ -1432,7 +1381,6 @@ static int mdss_mdp_parse_dt_pipe(struct platform_device *pdev)
 			mdata->vig_pipes + DEFAULT_TOTAL_VIG_PIPES,
 			offsets + DEFAULT_TOTAL_VIG_PIPES,
 			ftch_id + DEFAULT_TOTAL_VIG_PIPES,
-			xin_id + DEFAULT_TOTAL_VIG_PIPES,
 			MDSS_MDP_PIPE_TYPE_VIG, setup_cnt,
 			mdata->nvig_pipes - DEFAULT_TOTAL_VIG_PIPES);
 		if (rc)
@@ -1446,7 +1394,6 @@ static int mdss_mdp_parse_dt_pipe(struct platform_device *pdev)
 			mdata->rgb_pipes + DEFAULT_TOTAL_RGB_PIPES,
 			offsets + mdata->nvig_pipes + DEFAULT_TOTAL_RGB_PIPES,
 			ftch_id + mdata->nvig_pipes + DEFAULT_TOTAL_RGB_PIPES,
-			xin_id + mdata->nvig_pipes + DEFAULT_TOTAL_RGB_PIPES,
 			MDSS_MDP_PIPE_TYPE_RGB, setup_cnt,
 			mdata->nrgb_pipes - DEFAULT_TOTAL_RGB_PIPES);
 		if (rc)
@@ -1465,8 +1412,6 @@ rgb_alloc_fail:
 	kfree(mdata->vig_pipes);
 parse_done:
 vig_alloc_fail:
-	kfree(xin_id);
-xin_alloc_fail:
 	kfree(ftch_id);
 ftch_alloc_fail:
 	kfree(offsets);
@@ -1657,8 +1602,7 @@ static int mdss_mdp_parse_dt_smp(struct platform_device *pdev)
 	struct mdss_data_type *mdata = platform_get_drvdata(pdev);
 	u32 num;
 	u32 data[2];
-	int rc, len;
-	const u32 *arr;
+	int rc;
 
 	num = mdss_mdp_parse_dt_prop_len(pdev, "qcom,mdss-smp-data");
 
@@ -1680,49 +1624,7 @@ static int mdss_mdp_parse_dt_smp(struct platform_device *pdev)
 		"qcom,mdss-smp-mb-per-pipe", data);
 	mdata->smp_mb_per_pipe = (!rc ? data[0] : 0);
 
-	rc = 0;
-	arr = of_get_property(pdev->dev.of_node,
-		"qcom,mdss-pipe-rgb-fixed-mmb", &len);
-	if (arr) {
-		int i, j, k;
-		u32 cnt, mmb;
-
-		len /= sizeof(u32);
-		for (i = 0, k = 0; i < len; k++) {
-			struct mdss_mdp_pipe *pipe = NULL;
-
-			if (k >= mdata->nrgb_pipes) {
-				pr_err("invalid fixed mmbs for rgb pipes\n");
-				return -EINVAL;
-			}
-
-			pipe = &mdata->rgb_pipes[k];
-
-			cnt = be32_to_cpu(arr[i++]);
-			if (cnt == 0)
-				continue;
-
-			for (j = 0; j < cnt; j++) {
-				mmb = be32_to_cpu(arr[i++]);
-				if (mmb > mdata->smp_mb_cnt) {
-					pr_err("overflow mmb%d: rgb%d: max%d\n",
-						mmb, k, mdata->smp_mb_cnt);
-					return -EINVAL;
-				}
-				/* rgb pipes fetches only single plane */
-				set_bit(mmb, pipe->smp_map[0].fixed);
-			}
-			if (bitmap_intersects(pipe->smp_map[0].fixed,
-				mdata->mmb_alloc_map, mdata->smp_mb_cnt)) {
-				pr_err("overlapping fixed mmb map\n");
-				return -EINVAL;
-			}
-			bitmap_or(mdata->mmb_alloc_map, pipe->smp_map[0].fixed,
-				mdata->mmb_alloc_map, mdata->smp_mb_cnt);
-		}
-	}
-
-	return rc;
+	return 0;
 }
 
 static int mdss_mdp_parse_dt_misc(struct platform_device *pdev)
@@ -1730,7 +1632,6 @@ static int mdss_mdp_parse_dt_misc(struct platform_device *pdev)
 	struct mdss_data_type *mdata = platform_get_drvdata(pdev);
 	u32 data;
 	int rc;
-	struct property *prop = NULL;
 
 	rc = of_property_read_u32(pdev->dev.of_node, "qcom,mdss-rot-block-size",
 		&data);
@@ -1742,13 +1643,6 @@ static int mdss_mdp_parse_dt_misc(struct platform_device *pdev)
 		"qcom,mdss-has-decimation");
 	mdata->has_wfd_blk = of_property_read_bool(pdev->dev.of_node,
 		"qcom,mdss-has-wfd-blk");
-	prop = of_find_property(pdev->dev.of_node, "batfet-supply", NULL);
-	mdata->batfet_required = prop ? true : false;
-	rc = of_property_read_u32(pdev->dev.of_node,
-		 "qcom,mdss-highest-bank-bit", &(mdata->highest_bank_bit));
-	if (rc)
-		pr_debug("Could not read optional property: highest bank bit\n");
-
 	return 0;
 }
 
@@ -1824,76 +1718,6 @@ struct mdss_data_type *mdss_mdp_get_mdata()
 	return mdss_res;
 }
 
-static int mdss_mdp_cx_ctrl(struct mdss_data_type *mdata, int enable)
-{
-	int rc = 0;
-
-	if (!mdata->vdd_cx)
-		return rc;
-
-	if (enable) {
-		rc = regulator_set_voltage(
-				mdata->vdd_cx,
-				RPM_REGULATOR_CORNER_SVS_SOC,
-				RPM_REGULATOR_CORNER_SUPER_TURBO);
-		if (rc < 0)
-			goto vreg_set_voltage_fail;
-
-		pr_debug("Enabling CX power rail\n");
-		rc = regulator_enable(mdata->vdd_cx);
-		if (rc) {
-			pr_err("Failed to enable regulator.\n");
-			return rc;
-		}
-	} else {
-		pr_debug("Disabling CX power rail\n");
-		rc = regulator_disable(mdata->vdd_cx);
-		if (rc) {
-			pr_err("Failed to disable regulator.\n");
-			return rc;
-		}
-		rc = regulator_set_voltage(
-				mdata->vdd_cx,
-				RPM_REGULATOR_CORNER_NONE,
-				RPM_REGULATOR_CORNER_SUPER_TURBO);
-		if (rc < 0)
-			goto vreg_set_voltage_fail;
-	}
-
-	return rc;
-
-vreg_set_voltage_fail:
-	pr_err("Set vltg fail\n");
-	return rc;
-}
-
-void mdss_mdp_batfet_ctrl(struct mdss_data_type *mdata, int enable)
-{
-	if (!mdata->batfet_required)
-		return;
-
-	if (!mdata->batfet) {
-		if (enable) {
-			mdata->batfet = devm_regulator_get(&mdata->pdev->dev,
-				"batfet");
-			if (IS_ERR_OR_NULL(mdata->batfet)) {
-				pr_debug("unable to get batfet reg. rc=%d\n",
-					PTR_RET(mdata->batfet));
-				mdata->batfet = NULL;
-				return;
-			}
-		} else {
-			pr_debug("Batfet regulator disable w/o enable\n");
-			return;
-		}
-	}
-
-	if (enable)
-		regulator_enable(mdata->batfet);
-	else
-		regulator_disable(mdata->batfet);
-}
-
 static void mdss_mdp_footswitch_ctrl(struct mdss_data_type *mdata, int on)
 {
 	if (!mdata->fs)
@@ -1901,20 +1725,14 @@ static void mdss_mdp_footswitch_ctrl(struct mdss_data_type *mdata, int on)
 
 	if (on) {
 		pr_debug("Enable MDP FS\n");
-		if (!mdata->fs_ena) {
+		if (!mdata->fs_ena)
 			regulator_enable(mdata->fs);
-			mdss_mdp_cx_ctrl(mdata, true);
-			mdss_mdp_batfet_ctrl(mdata, true);
-		}
 		mdata->fs_ena = true;
 	} else {
 		pr_debug("Disable MDP FS\n");
 		mdss_iommu_dettach(mdata);
-		if (mdata->fs_ena) {
+		if (mdata->fs_ena)
 			regulator_disable(mdata->fs);
-			mdss_mdp_cx_ctrl(mdata, false);
-			mdss_mdp_batfet_ctrl(mdata, false);
-		}
 		mdata->fs_ena = false;
 	}
 }
@@ -2000,12 +1818,11 @@ static int mdss_mdp_resume(struct platform_device *pdev)
 static int mdss_mdp_runtime_resume(struct device *dev)
 {
 	struct mdss_data_type *mdata = dev_get_drvdata(dev);
-	bool device_on = true;
 	if (!mdata)
 		return -ENODEV;
 
 	dev_dbg(dev, "pm_runtime: resuming...\n");
-	device_for_each_child(dev, &device_on, mdss_fb_suspres_panel);
+
 	mdss_mdp_footswitch_ctrl(mdata, true);
 
 	return 0;
@@ -2025,7 +1842,6 @@ static int mdss_mdp_runtime_idle(struct device *dev)
 static int mdss_mdp_runtime_suspend(struct device *dev)
 {
 	struct mdss_data_type *mdata = dev_get_drvdata(dev);
-	bool device_on = false;
 	if (!mdata)
 		return -ENODEV;
 	dev_dbg(dev, "pm_runtime: suspending...\n");
@@ -2034,7 +1850,6 @@ static int mdss_mdp_runtime_suspend(struct device *dev)
 		pr_err("MDP suspend failed\n");
 		return -EBUSY;
 	}
-	device_for_each_child(dev, &device_on, mdss_fb_suspres_panel);
 	mdss_mdp_footswitch_ctrl(mdata, false);
 
 	return 0;
