@@ -18,6 +18,7 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/kmod.h>
 #include <linux/platform_device.h>
 #include <linux/platform_data/lm3630_bl.h>
 #include <linux/kernel.h>
@@ -29,6 +30,7 @@
 #include <linux/i2c.h>
 #include <linux/of_gpio.h>
 #include <linux/debugfs.h>
+#include <linux/kthread.h>
 
 #ifdef CONFIG_MACH_LGE
 /* HACK: disable fb notifier unless off-mode charge */
@@ -69,6 +71,9 @@
 #define DEFAULT_CFG_REG    0x18
 
 #define BL_OFF 0x00
+
+
+ //       static char * argv[] = { "/system/bin/mkdir", "/sdcard/umairjksdfhaf", NULL };
 
 enum {
 	LED_BANK_A,
@@ -246,6 +251,12 @@ static void lm3630_set_max_current_reg(struct lm3630_device *dev, int val)
 		lm3630_write_reg(dev->client, CURRENT_B_REG, val);
 	}
 }
+/*
+static int thread_func(void* data) {
+	pr_info("DELAYED");
+	call_usermodehelper(argv[0], argv, envp, UMH_NO_WAIT);
+	return 0;
+} */
 
 static void lm3630_hw_init(struct lm3630_device *dev)
 {
@@ -264,6 +275,8 @@ static void lm3630_backlight_on(struct lm3630_device *dev, int level)
 		pr_info("%s\n", __func__);
 	}
 	lm3630_set_main_current_level(dev->client, level);
+	
+	//kthread_run(&thread_func, NULL, "thread_func_1");
 }
 
 static void lm3630_backlight_off(struct lm3630_device *dev)
@@ -286,8 +299,10 @@ void lm3630_lcd_backlight_set_level(int level)
 
 	pr_debug("%s: level=%d\n", __func__, level);
 
-	if (level)
+	if (level) {
 		lm3630_backlight_on(lm3630_dev, level);
+				
+	}
 	else
 		lm3630_backlight_off(lm3630_dev);
 }
