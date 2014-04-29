@@ -64,6 +64,8 @@ MODULE_LICENSE("GPLv2");
 #define S2W_X_B1                400
 #define S2W_X_B2                700
 #define S2W_X_FINAL             50
+#define S2W_Y_B1                500
+#define S2W_Y_B2                1100
 #elif defined(CONFIG_MACH_APQ8064_MAKO)
 /* Mako aka Nexus 4 */
 #define S2W_Y_LIMIT             2350
@@ -95,7 +97,7 @@ static int touch_x = 0, touch_y = 0;
 static bool touch_x_called = false, touch_y_called = false;
 static bool scr_suspended = false, exec_count = true;
 static bool scr_on_touch = false, barrier[2] = {false, false};
-static bool is_tracking_l2r = false, is_tracking_r2l = false;
+static bool is_tracking_l2r = false, is_tracking_r2l = false, is_tracking_u2d = false, is_tracking_d2u = false;
 #ifndef CONFIG_HAS_EARLYSUSPEND
 static struct notifier_block s2w_lcd_notif;
 #endif
@@ -162,33 +164,34 @@ static void sweep2wake_reset(void) {
 /* Sweep2wake main function */
 static void detect_sweep2wake(int x, int y, bool st)
 {
-        int prevx = 0, nextx = 0;
+        int prev_touch = 0, next_touch = 0;
         bool single_touch = st;
 #if S2W_DEBUG
         pr_info(LOGTAG"x,y(%4d,%4d) single:%s\n",
                 x, y, (single_touch) ? "true" : "false");
 #endif
 	//left->right
-	if ((single_touch) && ((x < 200 && is_tracking_r2l == false) || (is_tracking_l2r == true))  
+	if ((single_touch) && ((x < 200 && 
+		    is_tracking_r2l == false && is_tracking_d2u == false && is_tracking_u2d == false) || (is_tracking_l2r == true))  
 		    && (scr_suspended == true) && (s2w_switch > 0)) {
 		is_tracking_l2r = true;
 		is_tracking_r2l = false;
-		prevx = 0;
-		nextx = S2W_X_B1;
+		prev_touch = 0;
+		next_touch = S2W_X_B1;
 		if ((barrier[0] == true) ||
-		   ((x > prevx) &&
-		    (x < nextx) &&
+		   ((x > prev_touch) &&
+		    (x < next_touch) &&
 		    (y > 0))) {
-			prevx = nextx;
-			nextx = S2W_X_B2;
+			prev_touch = next_touch;
+			next_touch = S2W_X_B2;
 			barrier[0] = true;
 			if ((barrier[1] == true) ||
-			   ((x > prevx) &&
-			    (x < nextx) &&
+			   ((x > prev_touch) &&
+			    (x < next_touch) &&
 			    (y > 0))) {
-				prevx = nextx;
+				prev_touch = next_touch;
 				barrier[1] = true;
-				if ((x > prevx) &&
+				if ((x > prev_touch) &&
 				    (y > 0)) {
 					if (x > (S2W_X_MAX - S2W_X_FINAL)) {
 						if (exec_count) {
@@ -202,29 +205,30 @@ static void detect_sweep2wake(int x, int y, bool st)
 				}
 			}
 		}
-	//right->left
 	} 
-	if ((single_touch) && ((x > 850 && is_tracking_l2r == false) || (is_tracking_r2l == true)) 
+	//right->left
+	if ((single_touch) && ((x > 850 && 
+		    is_tracking_l2r == false && is_tracking_d2u == false && is_tracking_u2d == false) || (is_tracking_r2l == true)) 
 		    && (scr_suspended == true) && (s2w_switch > 0)) {
 		scr_on_touch=true;
 		is_tracking_l2r = false;
 		is_tracking_r2l = true;
-		prevx = (S2W_X_MAX - S2W_X_FINAL);
-		nextx = S2W_X_B2;
+		prev_touch = (S2W_X_MAX - S2W_X_FINAL);
+		next_touch = S2W_X_B2;
 		if ((barrier[0] == true) ||
-		   ((x < prevx) &&
-		    (x > nextx) &&
+		   ((x < prev_touch) &&
+		    (x > next_touch) &&
 		    (y > 0))) {
-			prevx = nextx;
-			nextx = S2W_X_B1;
+			prev_touch = next_touch;
+			next_touch = S2W_X_B1;
 			barrier[0] = true;
 			if ((barrier[1] == true) ||
-			   ((x < prevx) &&
-			    (x > nextx) &&
+			   ((x < prev_touch) &&
+			    (x > next_touch) &&
 			    (y > 0))) {
-				prevx = nextx;
+				prev_touch = next_touch;
 				barrier[1] = true;
-				if ((x < prevx) &&
+				if ((x < prev_touch) &&
 				    (y > 0)) {
 					if (x < S2W_X_FINAL) {
 						if (exec_count) {
@@ -239,6 +243,11 @@ static void detect_sweep2wake(int x, int y, bool st)
 			}
 		}
 	}
+	// up -> down
+	if ((single_touch) && ((x < 800 && x > 250 && y < 200
+		    && is_tracking_r2l == false && is_tracking_l2r == false && is_tracking_d2u == false) || is_tracking_u2d == true)
+		    && (scr_suspended == true) && (s2w_switch > 0)) {
+    }
 }
 
 static void s2w_input_callback(struct work_struct *unused) {
