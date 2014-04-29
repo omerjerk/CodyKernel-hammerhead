@@ -64,6 +64,7 @@ MODULE_LICENSE("GPLv2");
 #define S2W_X_B1                400
 #define S2W_X_B2                700
 #define S2W_X_FINAL             50
+#define S2W_Y_FINAL             500
 #define S2W_Y_B1                500
 #define S2W_Y_B2                1100
 #elif defined(CONFIG_MACH_APQ8064_MAKO)
@@ -247,6 +248,35 @@ static void detect_sweep2wake(int x, int y, bool st)
 	if ((single_touch) && ((x < 800 && x > 250 && y < 200
 		    && is_tracking_r2l == false && is_tracking_l2r == false && is_tracking_d2u == false) || is_tracking_u2d == true)
 		    && (scr_suspended == true) && (s2w_switch > 0)) {
+		prev_touch = 0;
+	    is_tracking_u2d = true;
+	    next_touch = S2W_Y_B1;
+	    if ((barrier[0] == true) ||
+		   ((y > prev_touch) &&
+		    (y < next_touch) &&
+		    (x > 0))) {
+	    	prev_touch = next_touch;
+			next_touch = S2W_Y_B2;
+			barrier[0] = true;
+			if ((barrier[1] == true) ||
+			   ((y > prev_touch) &&
+			    (y < next_touch) &&
+			    (x > 0))) {
+				prev_touch = next_touch;
+				barrier[1] = true;
+				if ((y > prev_touch) &&
+				    (x > 0)) {
+					if (y > (S2W_Y_MAX - S2W_Y_FINAL)) {
+						if (exec_count) {
+							pr_info(LOGTAG"ON\n");
+							is_tracking_u2d = false;
+							sweep2wake_pwrtrigger();
+							exec_count = false;
+						}
+					}
+				}
+			}
+	    }
     }
 }
 
