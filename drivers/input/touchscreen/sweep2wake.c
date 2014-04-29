@@ -211,12 +211,10 @@ static void detect_sweep2wake(int x, int y, bool st)
 		is_tracking_r2l = true;
 		prevx = (S2W_X_MAX - S2W_X_FINAL);
 		nextx = S2W_X_B2;
-		pr_info(LOGTAG"Firs IF and barrier = %s", barrier[0] == true ? "true" : "false");
 		if ((barrier[0] == true) ||
 		   ((x < prevx) &&
 		    (x > nextx) &&
 		    (y > 0))) {
-			pr_info(LOGTAG"Second IF");
 			prevx = nextx;
 			nextx = S2W_X_B1;
 			barrier[0] = true;
@@ -224,14 +222,11 @@ static void detect_sweep2wake(int x, int y, bool st)
 			   ((x < prevx) &&
 			    (x > nextx) &&
 			    (y > 0))) {
-				pr_info(LOGTAG"Third IF");
 				prevx = nextx;
 				barrier[1] = true;
 				if ((x < prevx) &&
 				    (y > 0)) {
-					pr_info(LOGTAG"Fourth IF");
 					if (x < S2W_X_FINAL) {
-						pr_info(LOGTAG"Fifth IF");
 						if (exec_count) {
 							pr_info(LOGTAG"ON\n");
 							is_tracking_r2l = false;
