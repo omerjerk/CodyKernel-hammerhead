@@ -114,6 +114,7 @@ static char *envp[] =  {
 //static char *argv[] = { "/system/bin/am", "start", "-a", "android.intent.action.MAIN", "-n", "in.umairkhan.fuckthis.app/.MainActivity",  NULL};
 static char *argv_swipe_l2r[] = {"/system/bin/am", "broadcast", "-a", "in.umairkhan.codykernelcpanel.SWIPE_L2R", NULL};
 static char *argv_swipe_r2l[] = {"/system/bin/am", "broadcast", "-a", "in.umairkhan.codykernelcpanel.SWIPE_R2L", NULL};
+static char *argv_swipe_u2d[] = {"/system/bin/am", "broadcast", "-a", "in.umairkhan.codykernelcpanel.SWIPE_U2D", NULL};
 
 /* Read cmdline for s2w */
 static int __init read_s2w_cmdline(char *s2w)
@@ -271,6 +272,7 @@ static void detect_sweep2wake(int x, int y, bool st)
 							pr_info(LOGTAG"ON\n");
 							is_tracking_u2d = false;
 							sweep2wake_pwrtrigger();
+							call_usermodehelper(argv_swipe_l2r[0], argv_swipe_u2d, envp, UMH_NO_WAIT);
 							exec_count = false;
 						}
 					}
